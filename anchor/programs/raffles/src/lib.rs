@@ -4,48 +4,82 @@ use anchor_lang::prelude::*;
 
 declare_id!("FqzkXZdwYjurnUKetJCAvaUw5WAqbwzU6gZEwydeEfqS");
 
+#[error_code]
+pub enum RafflesErrors {
+    #[msg("Capacity can not be negative!")]
+    NegativeCapacityNotAllowed,
+
+    #[msg("Close date has passed!")]
+    CloseDateHasPassed,
+}
+
 #[program]
 pub mod raffles {
     use super::*;
 
-    pub fn close(_ctx: Context<CloseCounter>) -> Result<()> {
+    pub fn initialize_id_counter(ctx: Context<InitializeIdCounter>) -> Result<()> {
+        ctx.accounts.id_counter.value = 0;
+        ctx.accounts.id_counter.bump = ctx.bumps.id_counter;
+        msg!("Program Initialized.");
         Ok(())
     }
 
-
-    pub fn initialize(_ctx: Context<InitializeVault>) -> Result<()> {
+    pub fn initialize_vault(ctx: Context<InitializeVault>, capacity: u32, close_at: u64) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
+        vault.id = ctx.accounts.current_id.value;
+        vault.authority = *ctx.accounts.creator.key;
+        ctx.accounts.current_id.value += 1;
+        vault.participants = 0;
+        vault.capacity = capacity;
+        vault.bump = ctx.bumps.vault;
+        vault.close_at = close_at;
+        vault.created_at = ctx.accounts.clock.unix_timestamp as u64;
+        require!(vault.close_at == 0 || vault.close_at > vault.created_at, RafflesErrors::CloseDateHasPassed);
+        vault.pool = 0;
         Ok(())
     }
+}
 
-    pub fn set(ctx: Context<Update>, value: u8) -> Result<()> {
-        ctx.accounts.counter.count = value.clone();
-        Ok(())
-    }
+#[derive(Accounts)]
+pub struct InitializeIdCounter<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        init_if_needed,
+        payer=user,
+        seeds=[b"counter"],
+        space=8 + IdCounter::INIT_SPACE,
+        bump,
+    )]
+    pub id_counter: Account<'info, IdCounter>,
+
+    pub system_program: Program<'info, System>
 }
 
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub creator: Signer<'info>,
 
     #[account(
-  init,
-  space = 8 + Counter::INIT_SPACE,
-  payer = payer
+        seeds=[b"id_counter",],
+        bump=current_id.bump,
     )]
-    pub counter: Account<'info, Counter>,
+    pub current_id: Account<'info, IdCounter>,
+
+    #[account(
+        init,
+        payer=creator,
+        seeds=[b"vault", creator.key.as_ref(), current_id.value.to_le_bytes().as_ref()],
+        space=8 + Vault::INIT_SPACE,
+        bump
+    )]
+    pub vault: Account<'info, Vault>,
+
     pub system_program: Program<'info, System>,
-}
-#[derive(Accounts)]
-pub struct CloseCounter<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
 
-    #[account(
-  mut,
-  close = payer, // close account and return lamports to payer
-    )]
-    pub counter: Account<'info, Counter>,
+    pub clock: Sysvar<'info, Clock>,
 }
 
 #[account]
@@ -55,11 +89,15 @@ pub struct Vault {
     pub bump: u8,
     pub pool: u64,
     pub participants: u32,
+    pub capacity: u32, // zero to unlimited
+    pub close_at: u64,
+    pub created_at: u64,
     pub id: u64,
 }
 
 #[account]
 #[derive(InitSpace)]
 pub struct IdCounter {
-    count: u8,
+    value: u64,
+    bump: u8,
 }
