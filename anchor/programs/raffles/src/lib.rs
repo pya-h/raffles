@@ -11,6 +11,12 @@ pub enum RafflesErrors {
 
     #[msg("Close date has passed!")]
     CloseDateHasPassed,
+
+    #[msg("Insufficient funds!")]
+    InsufficientFunds,
+
+    #[msg("This vault does not allow any more participants!")]
+    CapacityExceeded,
 }
 
 #[program]
@@ -80,6 +86,49 @@ pub mod raffles {
         vault.inventory = vault_inventory_pda;
         Ok(())
     }
+
+    pub fn particpate_inf_raffle(
+        ctx: Context<ParticipateInRaffle>,
+        _vault_id: u64,
+        amount: u64,
+    ) -> Result<()> {
+        let vault_info = &mut ctx.accounts.vault_info;
+        require!(
+            vault_info.close_at == 0
+                || vault_info.close_at > ctx.accounts.clock.unix_timestamp as u64,
+            RafflesErrors::CloseDateHasPassed
+        );
+
+        require!(
+            ctx.accounts.user.lamports() >= amount,
+            RafflesErrors::InsufficientFunds
+        );
+
+        let user_share = &mut ctx.accounts.user_share;
+
+        if user_share.amount == 0 {
+            require!(
+                vault_info.capacity == 0 || vault_info.participants < vault_info.capacity,
+                RafflesErrors::CapacityExceeded
+            );
+            user_share.owner = *ctx.accounts.user.key;
+            user_share.vault = vault_info.key();
+            user_share.bump = ctx.bumps.user_share;
+            vault_info.participants += 1;
+        }
+
+        let tx = anchor_lang::solana_program::system_instruction::transfer(&ctx.accounts.user.key(), &ctx.accounts.vault_inventory.key(), amount);
+
+        anchor_lang::solana_program::program::invoke(&tx, &[
+            ctx.accounts.user.to_account_info(),
+            ctx.accounts.vault_inventory.to_account_info(),
+            vault_info.to_account_info(),
+        ])?; // check last 2 lines
+
+        vault_info.pool += amount;
+        user_share.amount += amount;
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -113,7 +162,7 @@ pub struct InitializeVault<'info> {
     #[account(
         init,
         payer=creator,
-        seeds=[b"vault-info", creator.key.as_ref(), current_id.value.to_le_bytes().as_ref()],
+        seeds=[b"vault-info", current_id.value.to_le_bytes().as_ref()],
         space=8 + Vault::INIT_SPACE,
         bump
     )]
@@ -123,10 +172,44 @@ pub struct InitializeVault<'info> {
     //     init,
     //     payer = creator,
     //     space = 0,
-    //     seeds = [b"vault", creator.key.as_ref(), current_id.value.to_le_bytes().as_ref()],
+    //     seeds = [b"vault", current_id.value.to_le_bytes().as_ref()],
     //     bump
     // )]
     // pub vault: Account<'info, Vault>,
+    pub system_program: Program<'info, System>,
+
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+#[instruction(vault_id: u64)]
+pub struct ParticipateInRaffle<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds=[b"vault-info", vault_id.to_le_bytes().as_ref()],
+        bump=vault_info.bump,
+    )]
+    pub vault_info: Account<'info, Vault>,
+
+    #[account(
+        init_if_needed,
+        payer=user,
+        space=8 + VaultShare::INIT_SPACE,
+        seeds=[b"shares", vault_info.key().as_ref(), user.key.as_ref()],
+        bump,
+    )]
+    pub user_share: Account<'info, VaultShare>,
+
+    #[account(
+        mut, 
+        seeds=[b"vault", vault_info.authority.as_ref(), vault_info.id.to_le_bytes().as_ref()], 
+        bump
+    )]
+    pub vault_inventory: AccountInfo<'info>,
+
     pub system_program: Program<'info, System>,
 
     pub clock: Sysvar<'info, Clock>,
@@ -144,6 +227,15 @@ pub struct Vault {
     pub created_at: u64,
     pub id: u64,
     pub inventory: Pubkey,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct VaultShare {
+    pub owner: Pubkey,
+    pub vault: Pubkey,
+    pub amount: u64,
+    pub bump: u8,
 }
 
 #[account]
